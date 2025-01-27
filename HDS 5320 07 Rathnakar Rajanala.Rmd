@@ -1,0 +1,239 @@
+---
+title: "Week 1 R programming assignment"
+output: html_notebook
+Name :- Rathnakar Rajanala
+---
+
+** load the datasets
+```{r}
+# loading necessary libraries
+library(dplyr)
+library(readr)
+
+# load given dataset's
+#outpatient visits
+outpatient_visits <- fread("OutpatientVisit.csv") 
+#patients
+patients <- fread("Patient.csv")   
+#clinics
+clinics <- fread("Clinic.csv")  
+#staff
+staff <- fread("Staff.csv")  
+#mortality
+mortality <- fread("Mortality.csv")  
+#icd codes
+icd_codes <- fread("ICDCodes.csv")  
+#disease map
+disease_map <- fread("DiseaseMap.csv")              
+
+```
+
+
+```{r}
+#merge patient data with mortality 
+patient_mortality <- merge(patients,mortality,by = "PatientID", all.x = TRUE)
+
+#data.table
+setDT(patient_mortality)
+
+# Create new column to indicate if patient is deceased(1) or alive(0)
+patient_mortality[,IsDeceased := !is.na(DateOfDeath)]
+
+#group by gender and calculate mortality rate
+mortality_rate <- patient_mortality[,.(
+  Totalpatients = .N,
+  DeceasedPatients = sum(IsDeceased ,na.rm = TRUE),
+  Mortality_Rate = sum(IsDeceased ,na.rm = TRUE)/ .N *100
+),by = Gender] 
+
+# print mortality rate
+print(mortality_rate)
+```
+****INTERPRETATION****
+
+-->Males have a slightly higher death rate than females in this dataset (35.95% vs. 35.11%).
+
+
+
+2.Are there patterns in the disease groups across gender. For every patient with at least one outpatient visit, identify if they have been diagnosed with any of the 22 conditions listed in the diseaseMap table at any time point. You will need to consider all three ICD columns in the outpatientVisit file (not just one). Create a table with the rate of disease for each condition for men, women, and all. It should look like this, where the XX% is the percent with the condition:
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(readr)
+
+# Load the datasets
+outpatient_visits <- read_csv("OutpatientVisit.csv")
+patients <- read_csv("Patient.csv")
+clinics <- read_csv("Clinic.csv")
+staff <- read_csv("Staff.csv")
+mortality <- read_csv("Mortality.csv")
+icd_codes <- read_csv("ICDCodes.csv")
+disease_map <- read_csv("DiseaseMap.csv")
+
+# Check structure of datasets
+str(outpatient_visits)
+str(patients)
+str(clinics)
+str(staff)
+str(mortality)
+str(icd_codes)
+str(disease_map)
+
+# Join the  outpatient visits with patient information to add Gender
+outpatient_with_gender <- outpatient_visits %>%
+  left_join(patients, by = "PatientID")
+
+# Reshape outpatient visits to long-format (one row per ICD code)
+outpatient_with_diseases <- outpatient_with_gender %>%
+  pivot_longer(cols = starts_with("ICD10"), names_to = "ICD_column", values_to = "ICD_code") %>%
+  # Join ICD codes to get ICD description
+  left_join(icd_codes, by = c("ICD_code" = "ICD10")) %>%
+  # Join disease map to get the disease condition
+  left_join(disease_map, by = c("ICD_code" = "ICD10"))
+
+# Create  list of disease to filter-by
+disease_list <- disease_map$Condition
+
+# Filter data to only include records where the disease condition is in the disease list
+outpatient_with_diseases_filtered <- outpatient_with_diseases %>%
+  filter(Condition %in% disease_list) %>%
+  distinct(PatientID, Condition, Gender)
+
+```
+
+```{r}
+# Calculate the disease rate by condition for men, women,for all
+disease_gender_rate <- outpatient_with_diseases_filtered %>%
+  group_by(Condition, Gender) %>%
+  summarise(
+    Total_Patients = n_distinct(PatientID),
+    .groups = "drop"
+  ) %>%
+  # Pivot the data to get separate columns for each gender and 'All'
+  pivot_wider(names_from = Gender, values_from = Total_Patients, values_fill = list(Total_Patients = 0)) %>%
+  # Add a column for the total number of patients
+  mutate(
+    All = rowSums(select(., -Condition), na.rm = TRUE),
+    Total_All = sum(All)
+  ) %>%
+  # Calculate the percent for each condition for each gender and 'All'
+  mutate(
+    Mens_Percentage = (male / Total_All) * 100,
+    Womens_Percentage = (female / Total_All) * 100,
+    All_Percent = (All / Total_All) * 100
+  )
+
+# Final table with the disease rates for men, women, and all
+final_disease_rt <- disease_gender_rate %>%
+  select(Condition, Mens_Percentage, Womens_Percentage, All_Percent)
+```
+
+```{r}
+#  final result
+print(final_disease_rt)
+```
+
+```{r}
+test_that("summaries populated", expect_equal(nrow(final_disease_rt), 22))
+```
+
+
+3.Calculate the mortality rate for every year between 2005 and 2018. Is it generally increasing, or decreasing? Assume patients are only at risk of death as of their first visit (in the outpatient Visit file). Once they have died, they are no longer at risk in subsequent year.
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(lubridate)
+
+# Load the datasets
+outpatient_visits <- read_csv("OutpatientVisit.csv")
+mortality <- read_csv("Mortality.csv")
+patients <- read_csv("Patient.csv")
+
+
+#  Identify the first outpatient visit for each patient
+first_visit <- outpatient_visits %>%
+  group_by(PatientID) %>%
+  summarise(FirstVisitDate = min(VisitDate), .groups = "drop")
+
+# Merge with mortality data to get the date of death for each patient
+mortality_data <- mortality %>%
+  left_join(patients, by = "PatientID") %>%
+  select(PatientID, DateOfDeath)
+
+# Merge first visit and mortality data to determine at-risk period
+patient_data <- first_visit %>%
+  left_join(mortality_data, by = "PatientID") %>%
+  mutate(
+    DateOfDeath = as.Date(DateOfDeath),
+    FirstVisitDate = as.Date(FirstVisitDate)
+  )
+
+# Step 3: Calculate mortality rates for each year between 2005 and 2018
+mortality_rate_by_year <- patient_data %>%
+  filter(!is.na(FirstVisitDate)) %>%
+  # For each year of first visit, we need to calculate mortality rate
+  mutate(YearOfFirstVisit = year(FirstVisitDate)) %>%
+  filter(YearOfFirstVisit >= 2005 & YearOfFirstVisit <= 2018) %>%
+  group_by(YearOfFirstVisit) %>%
+  summarise(
+    TotalPatients = n_distinct(PatientID),
+    TotalDeaths = sum(!is.na(DateOfDeath) & year(DateOfDeath) == YearOfFirstVisit),
+    MortalityRate = (TotalDeaths / TotalPatients) * 100,
+    .groups = "drop"
+  )
+
+# mortality rate by the year
+print(mortality_rate_by_year)
+
+```
+
+
+```{r}
+#Plot the mortality rates for years to check  trends
+library(ggplot2)
+
+ggplot(mortality_rate_by_year, aes(x = YearOfFirstVisit, y = MortalityRate)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("Mortality Rate by Year (2005 - 2018)") +
+  xlab("Year") +
+  ylab("Mortality Rate (%)") +
+  theme_minimal()
+```
+
+***INTEREPRETATION:
+The death rate data from 2005 to 2018 indicates a general downward trend, beginning at 5.858% in 2005 and falling to its lowest point of 3.125% in 2017, with occasional fluctuations.
+
+The greatest stable reduction occurred between 2008 and 2011, with rates progressively falling from 5.101% to 4.557%, indicating persistent improvements in patient care over this time.
+
+However, the latter years (2014-2018) demonstrated higher volatility, with considerable rises in 2016 (5.897%) and 2018 (5.263%), demonstrating that, while total mortality reduced during the 13-year period, there were significant year-to-year changes in the more recent years.
+
+```{r}
+# Check the rate is increasing or decreasing
+trend <- ifelse(lm(MortalityRate ~ Year, data = mortality_rates)$coefficients["Year"] > 0, 
+                "increasing", "decreasing")
+cat("The mortality rate is generally", trend, "\n")
+
+```
+
+```{r}
+get_mortality_rate <- function(year) {
+  rate <- mortality_rate_by_year %>%
+    filter(YearOfFirstVisit == year) %>%
+    pull(MortalityRate)
+  if (length(rate) == 0) return(NA)  # Return NA if year not found
+  return(rate)
+}                                                                                                           #Test mortality rates for all years between 2005 and 2018
+test_that("Mortality rates are correct for each year", {
+  for (year in 2005:2018) {
+    calculated_rate <- get_mortality_rate(year)
+    expected_rate <- mortality_rate_by_year %>%
+      filter(YearOfFirstVisit == year) %>%
+      pull(MortalityRate)
+    expect_equal(calculated_rate, expected_rate)  
+  }
+})
+```
+
