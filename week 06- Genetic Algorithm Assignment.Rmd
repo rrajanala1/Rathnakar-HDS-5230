@@ -1,0 +1,182 @@
+---
+title: "R Notebook"
+output: html_notebook
+Name : Rathnakar Rajanala
+Assignment : week 06- Genetic Algorithm Assignment
+---
+ 
+
+```{r}
+library(purrr)
+library(sf)
+library(GA)
+library(geosphere)
+library(data.table)
+```
+
+
+```{r}
+#population data
+popula.data <- data.table::fread("Mo_pop_Sim.csv")
+str(popula.data)
+fract <- 0.0001
+small.data <- popula.data[sample(1:nrow(popula.data),
+                          size = round(nrow(popula.data) * fract),
+                          replace = F),
+                          ]
+```
+```{r}
+#get the FQHC Data
+fqhc_data <- 'MO_2018_Federally_Qualified_Health_Center_Locations'
+Fqhc.data <- data.table(as.data.frame(st_read(fqhc_data,
+                                              'MO_2018_Federally_Qualified_Health_Center_Locations')))
+str(Fqhc.data)
+```
+
+```{r}
+#fqhc coordinates
+Fqhc.coordinates <-Fqhc.data[,.(Longitude,Latitude)]
+miles_radius <- 30
+miles_meters <- miles_radius* 1609.34
+```
+
+```{r}
+#Extract coordinates of FQHCs 
+Fqhc.coordinates <-Fqhc.data[,. (Longitude,Latitude)]
+
+# first method
+#compute population density with RADIUS
+miles_radius <- 30
+
+# convert radius to meters 
+meters_radius <- miles_radius * 1609.34
+
+```
+1.One approach can be to use the average closeness of a location from all of the residences - those locations that are the closest to all of the residences, on average, are the ones that are more easily accessible, and therefore would/should be selected. What is the assumption that is implicit here?
+```{r}
+# Function to count the population within radius of FQHC
+count_the_popu_in_radi <- function(Fqhc_idx) {
+  Fqhc_longit <- Fqhc.coordinates$Longitude[Fqhc_idx]
+  Fqhc_latit <- Fqhc.coordinates$Latitude[Fqhc_idx]
+  
+# Calculate distances from this FQHC to all the  population points
+  distances <- distHaversine(
+    matrix(c(Fqhc_longit, Fqhc_latit), ncol = 2),
+    as.matrix(small.data[, .(long, lat)])
+  )
+  
+# Count how many points fall with-in the radius
+  sum(distances <= meters_radius)
+}
+
+# Apply the function to each of FQHC
+popul_counts <- sapply(1:nrow(Fqhc.coordinates), count_the_popu_in_radi)
+
+
+# Create a data table with the  result
+results_dens <- data.table(
+  FQHC_ID = 1:nrow(Fqhc.coordinates),
+  Facility = Fqhc.data$Facility,
+  City = Fqhc.data$City,
+  Population_With_in_30mile = popul_counts
+)
+
+# Sort by population count (descending)
+results_dens <- results_dens[order(-Population_With_in_30mile)]
+
+```
+
+2.Another approach is to consider locations that have the highest densities of residences within a 30-mile radius (e.g., if location 1 has 59 residences and location 2 has 84 residences in a 30-mile radius, location 1 is to be considered "better" - why? because it can serve more people)
+```{r}
+# 2nd method: Average distance to the  population
+# Function to calculate average distance from an FQHC to all  of the population points
+calcu_aver_distance <- function(fqhc_idx) {
+  Fqhc_longit <- Fqhc.coordinates$Longitude[fqhc_idx]
+  Fqhc_latit <- Fqhc.coordinates$Latitude[fqhc_idx]
+  distances <- distHaversine(
+    matrix(c(Fqhc_longit, Fqhc_latit), ncol = 2),
+    as.matrix(small.data[, .(long, lat)])
+  )
+  
+  mean(distances) / 1609.34
+}
+
+top_fqhcs <- results_dens$FQHC_ID[1:30]
+aver_distances <- sapply(top_fqhcs, calcu_aver_distance)
+
+# Create a data table with results
+results_dist <- data.table(
+  FQHC_ID = top_fqhcs,
+  Facility = Fqhc.data$Facility[top_fqhcs],
+  City = Fqhc.data$City[top_fqhcs],
+  Aver_Distance_Miles = aver_distances
+)
+
+# Sort by average distance
+results_dist<- results_dist[order(Aver_Distance_Miles)]
+
+# Normalize each metric to 0-1   scale
+results_combine <- data.table(
+  FQHC_ID = results_dist$FQHC_ID,
+  Facility = results_dist$Facility,
+  City = results_dist$City,
+  Population_Score = results_dens[match(results_dist$FQHC_ID, results_dens$FQHC_ID), 
+                                    Population_With_in_30mile / max(-Population_With_in_30mile)],
+  Distance_Score = 1 - (results_dist$Aver_Distance_Miles / max(results_dist$Aver_Distance_Miles))
+)
+
+# Calculate combined score
+results_combine[, Combined_Score := (Population_Score + Distance_Score) / 2]
+results_combine <- results_combine[order(-Combined_Score)]
+
+top_8_Fqhcs <- results_combine[1:8]
+
+print(top_8_Fqhcs)
+```
+
+```{r}
+# Define fitness function for the  GA
+fitness_fun <- function(selected_indices) {
+  selected_Fqhcs <- results_combine[selected_indices, ]
+  total_fitn <- sum(selected_Fqhcs$Combine_Score)
+  
+  return(total_fitn)
+}
+
+
+# Run Genetic Algorithm
+set.seed(123)
+result_ga <- ga(
+  type = "permutation",
+  fitness = function(indices) fitness_fun(indices),
+  lower = 1,
+  upper = nrow(results_combine),
+  popSize = 50,  
+  maxiter = 100,  
+  run = 50, 
+  pmutation = 0.2, 
+  elitism = 5, 
+  parallel = FALSE, 
+  names = results_combine$Facility
+)
+
+# best solution
+best_solution <- result_ga@solution[1, ]
+optimal_Fqhcs <- results_combine[best_solution, ]
+
+# Print the optimal set of FQHCs
+print(optimal_Fqhcs)
+```
+From the above two possibilities, choose one and explain your rationale for choosing it, along with the assumptions you are making in computing the fitness of each location. Then, describe the fitness function - what is the metric that you would compute and would it be maximized or minimized? Why?
+
+
+*******
+When identifying FQHCs to provide specialized mental health care, I will use the population density method as a selection factor. To maximize the delivery range of these specialist services, this method picks geographic areas with the largest inhabitant count within thirty miles. The strategy grounds its judgment on the restricted nature of mental health resources, assessing their capacity to serve the greatest number of individuals while assuring the best use of healthcare money and greater access to treatment.
+
+--->Several key conditions lay the groundwork for this strategy to function. This strategy assumes that people in need of mental health care are willing to travel 30 miles for assistance, as this is the normal distance in many Missouri communities. Although this research simplifies the relationship between population density and mental health needs at the population level, it is still based on it. This strategy ignores the possibility that mental health needs differ throughout localities and instead exhibits uniform trends across the population.
+
+---->The fitness evaluation in this method uses demographic data from areas within thirty miles of each FQHC site. When eight FQHCs with the greatest population counts within their designated 30-mile radii are picked, the population count measure reaches its peak value. To calculate the fitness value of FQHC location i, we sum the population points within 30 miles of this place. The selection approach focuses on places that have the highest fitness values.
+
+CONCLUSION:-
+
+----> The optimization technique is directly applicable to servicing the greatest number of patients while operating under a limited budget. The chosen locations are concentrated in heavily populated areas to serve the greatest number of persons suffering from untreated mental health concerns, hence minimizing the state's mental health treatment gap. The system is a simple approach to data-driven resource allocation, but it does not ensure total geographical homogeneity or transportation accessibility disparities in its operating zones. Instead, it tries to maximize mental health care reach across Missouri.
