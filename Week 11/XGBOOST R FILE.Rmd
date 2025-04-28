@@ -1,0 +1,177 @@
+---
+title: "R Notebook"
+output: html_notebook
+name : Rathnakar Rajanala
+assignment : "comparision of R/Python for XGBoost"
+---
+
+```{r}
+install.packages("mlbench")
+install.packages("purrr")
+install.packages("tibble")
+install.packages("xgboost")
+install.packages("caret")
+```
+
+
+```{r}
+library(mlbench)
+library(purrr)
+library(tibble)
+library(readr)
+library(dplyr)
+```
+
+
+```{r}
+# Load, clean the data
+data("PimaIndiansDiabetes2")
+ds <- as.data.frame(na.omit(PimaIndiansDiabetes2))
+```
+
+```{r}
+print("Original Data Dimensions:")
+print(dim(ds))
+```
+
+
+```{r}
+print("Original Data Structure:")
+glimpse(ds)
+```
+
+
+```{r}
+# Fit the logistic regression model
+log_model <- glm(diabetes ~ ., data = ds, family = "binomial")
+cat("Logistic Model Summary:\n")
+summary(log_model)
+
+# Extract coefficients and predictor names
+model_coefs <- coef(log_model)
+predictors <- names(model_coefs)[-1]
+s_size <- 1e8
+
+cat("Generating synthetic data of size:", s_size, "\n")
+
+# Sample predictors with the  replacement
+synthetic_data_X <- map_dfc(predictors, ~ sample(ds[[.x]], s_size, replace = TRUE))
+names(synthetic_data_X) <- predictors
+glimpse(synthetic_data_X)
+
+# Calculate logistics and probaby
+logits <- reduce(map2(model_coefs[-1], predictors, ~ .x * synthetic_data_X[[.y]]), `+`) + model_coefs[1]
+predictors <- 1 / (1 + exp(-logits))
+```
+```{r}
+# Generation of the  binary outcome
+synthetic_data_X$outcome <- as.integer(predictors > 0.5)
+
+cat("Outcome generation done.\n")
+glimpse(synthetic_data_X)
+cat("Class distribution:\n")
+print(table(synthetic_data_X$outcome))
+```
+```{r}
+# Save to CSV file
+out_file <- "generated_pima_data.csv"
+write_csv(synthetic_data_X, out_file)
+cat("Saved to:", out_file, "\n")
+```
+
+
+XGBoost in R – direct use of xgboost() with simple cross-validation
+
+and 
+
+XGBoost in R – via caret, with 5-fold CV simple cross-validation
+
+```{r}
+
+library(xgboost)
+library(caret)
+library(dplyr)
+library(readr)
+library(tictoc)
+
+# Config
+file <- "generated_pima_data.csv"
+sizes <- c(100, 1000, 1e4, 1e5, 1e6, 1e7)
+res <- list()
+folds <- 5
+cols_x <- c('pregnant', 'glucose', 'pressure', 'triceps', 'insulin', 'mass', 'pedigree', 'age')
+col_y <- 'outcome'
+
+cat("Running XGBoost tests on", file, "\n", strrep("-", 40), "\n")
+
+for (sz in sizes) {
+  cat("\nSize:", sz, "\n")
+  
+  # Load
+  tic()
+  df <- tryCatch(
+    read_csv(file, n_max = sz, col_types = cols(.default = col_double(), outcome = col_integer())),
+    error = function(e) { cat("Read error:", e$message, "\n"); next }
+  )
+  t1 <- toc(quiet = TRUE)
+  cat("Load time:", round(t1$toc - t1$tic, 2), "s\n")
+  
+  if (!all(c(cols_x, col_y) %in% names(df))) {
+    cat("Missing columns\n"); next
+  }
+
+  # --- xgb.cv ---
+  cat("Running xgb.cv...\n")
+  X <- as.matrix(df[, cols_x])
+  y <- df[[col_y]]
+  if (!is.numeric(y) || anyNA(X) || anyNA(y)) {
+    cat("Bad data format or NA\n"); next
+  }
+
+  dmat <- xgb.DMatrix(data = X, label = y)
+  prm <- list(objective = "binary:logistic", eval_metric = "error", eta = 0.1, max_depth = 6)
+
+  tic()
+  cv <- tryCatch(
+    xgb.cv(data = dmat, params = prm, nrounds = 100, nfold = folds,
+           early_stopping_rounds = 10, stratified = TRUE, verbose = 0),
+    error = function(e) { cat("xgb.cv error:", e$message, "\n"); NULL }
+  )
+  t2 <- toc(quiet = TRUE)
+  acc1 <- if (!is.null(cv)) 1 - cv$evaluation_log$test_error_mean[cv$best_iteration] else "Error"
+  cat("xgb.cv acc:", ifelse(is.numeric(acc1), round(acc1, 4), acc1), "\n")
+
+  res[[length(res)+1]] <- list(Method = "xgb.cv", Size = sz, Accuracy = acc1, Time = round(t2$toc - t2$tic, 2))
+
+  #  caret::train
+  cat("Running caret::train...\n")
+  df2 <- df
+  df2[[col_y]] <- factor(paste0("C", df2[[col_y]]), levels = c("C0", "C1"))
+  ctrl <- trainControl(method = "cv", number = folds, allowParallel = TRUE)
+
+  tic()
+  mdl <- tryCatch(
+    train(as.formula(paste(col_y, "~ .")), data = df2, method = "xgbTree", trControl = ctrl, tuneLength = 1, verbose = 0),
+    error = function(e) { cat("caret error:", e$message, "\n"); NULL }
+  )
+  t3 <- toc(quiet = TRUE)
+  acc2 <- if (!is.null(mdl)) max(mdl$results$Accuracy) else "Error"
+  cat("caret acc:", ifelse(is.numeric(acc2), round(acc2, 4), acc2), "\n")
+
+  res[[length(res)+1]] <- list(Method = "caret::train", Size = sz, Accuracy = acc2, Time = round(t3$toc - t3$tic, 2))
+
+  rm(df, df2, X, y, dmat, cv, mdl)
+  gc()
+}
+
+# Summary of the XGBoost in R – direct use of xgboost() with simple cross-validation and XGBoost in R – via caret, with 5-fold CV simple cross-validation
+
+cat("\n", strrep("=", 40), "\nSummary\n", strrep("=", 40), "\n")
+res_df <- bind_rows(res)
+print(res_df)
+write_csv(res_df, "xgb_r_results.csv")
+cat("Saved to xgb_r_results.csv\n")
+
+```
+
+
